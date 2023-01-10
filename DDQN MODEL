@@ -1,0 +1,477 @@
+import enum
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import torch.optim as optim
+import numpy as np
+from collections import namedtuple
+import glob
+import os
+import csv
+import random
+import datetime
+from tensorboardX import SummaryWriter
+
+class Actions(enum.IntEnum):
+    Buy_100 = 0
+    Buy_10 = 1
+    Skip = 2
+    Sell_10 = 3
+    Sell_100 = 4
+    #環境設定
+DEFAULT_BARS_COUNT = 10
+DEFAULT_COMMISSION = 0.001
+
+class StocksEnv:
+    
+    def __init__(self, data):
+        self.data = data
+        self.bars_count = DEFAULT_BARS_COUNT
+        self.commission = DEFAULT_COMMISSION
+        self.shape = self.bars_count*24+1 
+    
+    def reset(self):
+        self.fund = 100000
+        self.hold = 0
+        self.buy_price = []
+        self.instrument = np.random.choice(list(self.data.keys()))
+        self.prices = self.data[self.instrument]
+        self.offset = np.random.choice(self.prices.open.shape[0]-self.bars_count*10) + self.bars_count - 1
+        obs = self.encode()
+        return obs
+    
+    def reset_val(self, index):
+        self.fund = 100000
+        self.hold = 0
+        self.buy_price = []
+        self.instrument = list(self.data.keys())[index]
+        self.prices = self.data[self.instrument]
+        self.offset = 9
+        obs = self.encode()
+        return obs
+    
+    def step(self, action):
+        reward = 0.0
+        done = False
+        close = self.prices.close[self.offset]
+        price = self.prices.price[self.offset]
+        self.affordable = self.fund // price
+        if action == Actions.Buy_100 and self.affordable >= 100:
+            reward -= self.commission * 10
+            self.hold += 100
+            self.fund -= price * 100
+            if int(price * 100 * 0.001425) == 0:
+                tax = 1
+            else:
+                tax = int(price * 100 * 0.001425)
+            self.fund -= tax
+            self.buy_price.extend([price]*10)
+        elif action == Actions.Buy_10 and self.affordable >= 10:
+            reward -= self.commission
+            self.hold += 10
+            self.fund -= price * 10
+            if int(price * 10 * 0.001425) == 0:
+                tax = 1
+            else:
+                tax = int(price * 10 * 0.001425)
+            self.fund -= tax
+            self.buy_price.extend([price])
+        elif action == Actions.Sell_100 and self.hold >= 100:
+            reward -= self.commission * 10
+            self.hold -= 100
+            self.fund += price * 100
+            if int(price * 100 * 0.001425) == 0:
+                tax = 1
+            else:
+                tax = int(price * 100 * 0.001425)
+            self.fund -= (tax + int(price*100*0.003))
+            for i in range(10):
+                reward += 100.0 * (price - self.buy_price[0]) / self.buy_price[0]
+                self.buy_price.pop(0)
+        elif action == Actions.Sell_10 and self.hold >= 10:
+            reward -= self.commission
+            self.hold -= 10
+            self.fund += price * 10
+            if int(price * 10 * 0.001425) == 0:
+                tax = 1
+            else:
+                tax = int(price * 10 * 0.001425)
+            self.fund -= (tax + int(price*10*0.003))
+            reward += 100.0 * (price - self.buy_price[0]) / self.buy_price[0]
+            self.buy_price.pop(0)
+        self.offset += 1
+        prev_price = price
+        price = self.prices.price[self.offset]
+        if self.offset >= self.prices.close.shape[0]-1:
+            done = True
+        if self.hold > 0:
+            reward += 100.0 * (price - prev_price) / prev_price * self.hold / 10
+             
+        obs = self.encode()
+        info = {"instrument": self.instrument, "offset": self.offset}
+        
+        return obs, reward, done, info
+    
+    def encode(self):
+        obs = np.ndarray(shape=(self.shape), dtype=np.float32)
+        shift = 0
+        for bar_idx in range(-self.bars_count+1, 1):
+            obs[shift] = self.prices.open[self.offset + bar_idx]
+            shift += 1
+            obs[shift] = self.prices.high[self.offset + bar_idx]
+            shift += 1
+            obs[shift] = self.prices.low[self.offset + bar_idx]
+            shift += 1
+            obs[shift] = self.prices.close[self.offset + bar_idx]
+            shift += 1
+            obs[shift] = self.prices.fa[self.offset + bar_idx]
+            shift += 1
+            obs[shift] = self.prices.fafive[self.offset + bar_idx]
+            shift += 1
+            obs[shift] = self.prices.faten[self.offset + bar_idx]
+            shift += 1
+            obs[shift] = self.prices.fatwenty[self.offset + bar_idx]
+            shift += 1
+            obs[shift] = self.prices.fvolume[self.offset + bar_idx]
+            shift += 1
+            obs[shift] = self.prices.fvolumefive[self.offset + bar_idx]
+            shift += 1
+            obs[shift] = self.prices.fvolumeten[self.offset + bar_idx]
+            shift += 1
+            obs[shift] = self.prices.fvolumetwenty[self.offset + bar_idx]
+            shift += 1
+            obs[shift] = self.prices.fbb[self.offset + bar_idx]
+            shift += 1
+            obs[shift] = self.prices.fbbten[self.offset + bar_idx]
+            shift += 1
+            obs[shift] = self.prices.fbbtwenty[self.offset + bar_idx]
+            shift += 1
+            obs[shift] = self.prices.fv[self.offset + bar_idx]
+            shift += 1
+            obs[shift] = self.prices.fvfive[self.offset + bar_idx]
+            shift += 1
+            obs[shift] = self.prices.fvten[self.offset + bar_idx]
+            shift += 1
+            obs[shift] = self.prices.frsv[self.offset + bar_idx]
+            shift += 1
+            obs[shift] = self.prices.fk[self.offset + bar_idx]
+            shift += 1
+            obs[shift] = self.prices.fd[self.offset + bar_idx]
+            shift += 1
+            obs[shift] = self.prices.frsi[self.offset + bar_idx]
+            shift += 1
+            obs[shift] = self.prices.fubb[self.offset + bar_idx]
+            shift += 1
+            obs[shift] = self.prices.flbb[self.offset + bar_idx]
+            shift += 1
+        obs[shift] = self.hold
+        return obs
+
+class DDQN(nn.Module):
+    
+    def __init__(self, in_n, out_n):
+        super(DDQN, self).__init__()
+        
+        self.fc = nn.Sequential(
+            nn.Linear(in_n, 512),
+            nn.ReLU(),
+            nn.Linear(512, 512),
+            nn.ReLU(),
+            nn.Linear(512, out_n)
+        )
+
+    def forward(self, x):
+        return self.fc(x)
+        
+DEFAULT_train_data = ""
+DEFAULT_val_data = ""
+Prices = namedtuple('prices', ('open', 'high', 'low', 'close', 'fa', 'fafive', 'faten', 'fatwenty', 'fvolume', 'fvolumefive', 'fvolumeten', 'fvolumetwenty', 'fbb', 'fbbten', 'fbbtwenty', 'fv', 'fvfive', 'fvten', 'frsv', 'fk', 'fd', 'frsi', 'fubb', 'flbb', 'price'))
+
+def data_files(dir_name):
+    result = []
+    for path in glob.glob(os.path.join(dir_name, "*.csv")):
+        result.append(path)
+    return result
+
+def read_csv(file_name, sep = ','):
+    print("Reading", file_name)
+    with open(file_name, 'rt', encoding='utf-8') as fd:
+        reader = csv.reader(fd, delimiter=sep)
+        h = next(reader)
+        if 'Open' not in h and sep == ',':
+            return read_csv(file_name, ';')
+        indices = [h.index(s) for s in ('Open', 'High', 'Low', 'Close', 'A', 'A5', 'A10', 'A20', 'Capacity', 'Capacity5', 'Capacity10', 'Capacity20', 'BB', 'BB10', 'BB20', 'V', 'V5', 'V10', 'rsv', 'K', 'D', 'rsi', 'UBB', 'LBB')]
+        o, h, l, c, a, afive, aten, atwenty, volume, volumefive, volumeten, volumetwenty, bb, bbten, bbtwenty, v, vfive, vten, rsv, k, d, rsi, ubb, lbb = [], [], [], [], [],[], [], [], [], [],[], [], [], [], [],[], [], [], [], [],[], [], [], []
+        for row in reader:
+            vals = list(map(float, [row[idx] for idx in indices]))
+            po, ph, pl, pc,pa, pafive, paten, patwenty, pvolume, pvolumefive, pvolumeten, pvolumetwenty, pbb, pbbten, pbbtwenty, pv, pvfive, pvten, prsv, pk, pd, prsi, pubb, plbb  = vals
+            o.append(po)
+            c.append(pc)
+            h.append(ph)
+            l.append(pl)
+            a.append(pa)
+            afive.append(pafive)
+            aten.append(paten)
+            atwenty.append(patwenty)
+            volume.append(pvolume)
+            volumefive.append(pvolumefive)
+            volumeten.append(pvolumeten)
+            volumetwenty.append(pvolumetwenty)
+            bb.append(pbb)
+            bbten.append(pbbten)
+            bbtwenty.append(pbbtwenty)
+            v.append(pv)
+            vfive.append(pvfive)
+            vten.append(pvten)
+            rsv.append(prsv)
+            k.append(pk)
+            d.append(pd)
+            rsi.append(prsi)
+            ubb.append(pubb)
+            lbb.append(plbb)
+            
+    print("Read done")
+    return Prices(open=np.array(o, dtype=np.float32),
+                  high=np.array(h, dtype=np.float32),
+                  low=np.array(l, dtype=np.float32),
+                  close=np.array(c, dtype=np.float32),
+                  fa=np.array(a, dtype=np.float32),
+                  fafive=np.array(afive, dtype=np.float32),
+                  faten=np.array(aten, dtype=np.float32),
+                  fatwenty=np.array(atwenty, dtype=np.float32),
+                  fvolume=np.array(volume, dtype=np.float32),
+                  fvolumefive=np.array(volumefive, dtype=np.float32),
+                  fvolumeten=np.array(volumeten, dtype=np.float32),
+                  fvolumetwenty=np.array(volumetwenty, dtype=np.float32),
+                  fbb=np.array(bb, dtype=np.float32),
+                  fbbten=np.array(bbten, dtype=np.float32),
+                  fbbtwenty=np.array(bbtwenty, dtype=np.float32),
+                  fv=np.array(v, dtype=np.float32),
+                  fvfive=np.array(vfive, dtype=np.float32),
+                  fvten=np.array(vten, dtype=np.float32),
+                  frsv=np.array(rsv, dtype=np.float32),
+                  fk=np.array(k, dtype=np.float32),
+                  fd=np.array(d, dtype=np.float32),
+                  frsi=np.array(rsi, dtype=np.float32),
+                  fubb=np.array(ubb, dtype=np.float32),
+                  flbb=np.array(lbb, dtype=np.float32),
+                  price=np.array(c, dtype=np.float32))
+
+def prices_nlz(prices):
+    o = (prices.open-prices.open.min()) / (prices.open.max()-prices.open.min())
+    h = (prices.high-prices.high.min()) / (prices.high.max()-prices.high.min())
+    l = (prices.low-prices.low.min()) / (prices.low.max()-prices.low.min())
+    c = (prices.close-prices.close.min()) / (prices.close.max()-prices.close.min())
+    a = (prices.fa-prices.fa.min()) / (prices.fa.max()-prices.fa.min())
+    afive = (prices.fafive-prices.fafive.min()) / (prices.fafive.max()-prices.fafive.min())
+    aten = (prices.faten-prices.faten.min()) / (prices.faten.max()-prices.faten.min())
+    atwenty = (prices.fatwenty-prices.fatwenty.min()) / (prices.fatwenty.max()-prices.fatwenty.min())
+    volume = (prices.fvolume-prices.fvolume.min()) / (prices.fvolume.max()-prices.fvolume.min())
+    volumefive = (prices.fvolumefive-prices.fvolumefive.min()) / (prices.fvolumefive.max()-prices.fvolumefive.min())
+    volumeten = (prices.fvolumeten-prices.fvolumeten.min()) / (prices.fvolumeten.max()-prices.fvolumeten.min())
+    volumetwenty = (prices.fvolumetwenty-prices.fvolumetwenty.min()) / (prices.fvolumetwenty.max()-prices.fvolumetwenty.min())
+    bb = (prices.fbb-prices.fbb.min()) / (prices.fbb.max()-prices.fbb.min())
+    bbten = (prices.fbbten-prices.fbbten.min()) / (prices.fbbten.max()-prices.fbbten.min())
+    bbtwenty = (prices.fbbtwenty-prices.fbbtwenty.min()) / (prices.fbbtwenty.max()-prices.fbbtwenty.min())
+    v = (prices.fv-prices.fv.min()) / (prices.fv.max()-prices.fv.min())
+    vfive = (prices.fvfive-prices.fvfive.min()) / (prices.fvfive.max()-prices.fvfive.min())
+    vten = (prices.fvten-prices.fvten.min()) / (prices.fvten.max()-prices.fvten.min())
+    rsv = (prices.frsv-prices.frsv.min()) / (prices.frsv.max()-prices.frsv.min())
+    k = (prices.fk-prices.fk.min()) / (prices.fk.max()-prices.fk.min())
+    d = (prices.fd-prices.fd.min()) / (prices.fd.max()-prices.fd.min())
+    rsi = (prices.frsi-prices.frsi.min()) / (prices.frsi.max()-prices.frsi.min())
+    ubb = (prices.fubb-prices.fubb.min()) / (prices.fubb.max()-prices.fubb.min())
+    lbb = (prices.flbb-prices.flbb.min()) / (prices.flbb.max()-prices.flbb.min())
+    p = prices.close
+    return Prices(open=o, high=h, low=l, close=c, fa=a,fafive=afive, faten=aten, fatwenty=atwenty, fvolume=volume, fvolumefive=volumefive,fvolumeten=volumeten, fvolumetwenty=volumetwenty, fbb=bb, fbbten=bbten, fbbtwenty=bbtwenty,fv=v, fvfive=vfive, fvten=vten, frsv=rsv, fk=k,fd=d, frsi=rsi, fubb=ubb, flbb=lbb, price=p)
+
+data_train = {file: prices_nlz(read_csv(file)) for file in data_files(DEFAULT_train_data)}
+data_val = {file: prices_nlz(read_csv(file)) for file in data_files(DEFAULT_val_data)}
+
+Transition = namedtuple('Transition', ('state', 'action', 'state_next', 'reward'))
+
+class ReplayMemory:
+    
+    def __init__(self, CAPACITY):
+        self.capacity = CAPACITY
+        self.memory = []
+        self.index = 0
+        
+    def push(self, state, action, state_next, reward):
+        if len(self.memory) < self.capacity:
+            self.memory.append(None)
+        self.memory[self.index] = Transition(state, action, state_next, reward)
+        self.index = (self.index + 1) % self.capacity
+        
+    def sample(self, batch_size):
+        return random.sample(self.memory, batch_size)
+    
+    def __len__(self):
+        return len(self.memory)
+        
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+BATCH_SIZE = 32
+CAPACITY = 100000
+GAMMA = 0.99
+
+class Brain:
+    
+    def __init__(self, input_shape, actions_n):
+        self.actions_n = actions_n
+        self.memory = ReplayMemory(CAPACITY)
+        
+        self.main_q_network = DDQN(input_shape, actions_n).to(device)
+        self.target_q_network = DDQN(input_shape, actions_n).to(device)
+        print(self.main_q_network)
+        self.optimizer = optim.Adam(self.main_q_network.parameters(), lr=0.0001)
+        
+    def replay(self):
+        if len(self.memory) < BATCH_SIZE:
+            return
+        self.batch, self.state_batch, self.action_batch, self.reward_batch, self.state_next_batch = self.make_minibatch()
+        self.expected_state_action_values = self.get_q_values()
+        self.update_main_q_network()
+    
+    def decide_action(self, state, episode):
+        epsilon = 1 / (episode*0.1 + 1)
+        
+        if epsilon <= np.random.uniform(0, 1):
+            self.main_q_network.eval()
+            with torch.no_grad():
+                action = self.main_q_network(state).max(1)[1].view(1, 1)
+        else:
+            action = torch.LongTensor([[random.randrange(self.actions_n)]]).to(device)
+        return action
+    
+    def decide_action_val(self, state):
+        self.main_q_network.eval()
+        with torch.no_grad():
+            action = self.main_q_network(state).max(1)[1].view(1, 1)
+        return action
+    
+    def make_minibatch(self):
+        transitions = self.memory.sample(BATCH_SIZE)
+        batch = Transition(*zip(*transitions))
+        state_batch = torch.cat(batch.state)
+        action_batch = torch.cat(batch.action)
+        reward_batch = torch.cat(batch.reward)
+        state_next_batch = torch.cat(batch.state_next)
+        return batch, state_batch, action_batch, reward_batch, state_next_batch
+    
+    def get_q_values(self):
+        self.main_q_network.eval()
+        self.target_q_network.eval()
+        
+        self.state_action_values = self.main_q_network(self.state_batch).gather(1, self.action_batch)
+        a_m = self.main_q_network(self.state_next_batch).detach().max(1)[1]
+        a_m_state_next_batch = a_m.view(-1, 1)
+        state_next_values = self.target_q_network(self.state_next_batch).gather(
+            1, a_m_state_next_batch).detach().squeeze()
+        expected_state_action_values = self.reward_batch + GAMMA * state_next_values
+        return expected_state_action_values
+    
+    def update_main_q_network(self):
+        self.main_q_network.train()
+        
+        loss = F.smooth_l1_loss(self.state_action_values, self.expected_state_action_values.unsqueeze(1))
+        self.optimizer.zero_grad()
+        loss.backward()
+        self.optimizer.step()
+        
+    def update_target_q_network(self):
+        self.target_q_network.load_state_dict(self.main_q_network.state_dict())
+        
+class Agent:
+    
+    def __init__(self, input_shape, actions_n):
+        self.brain = Brain(input_shape, actions_n)
+        
+    def update_q_function(self):
+        self.brain.replay()
+    
+    def get_action(self, state, episode):
+        action = self.brain.decide_action(state, episode)
+        return action
+    
+    def get_action_val(self, state):
+        action = self.brain.decide_action_val(state)
+        return action
+    
+    def memorize(self, state, action, state_next, reward):
+        self.brain.memory.push(state, action, state_next, reward)
+        
+    def update_target_q_function(self):
+        self.brain.update_target_q_network()
+        
+ DEFAULT_EPISODES = 100000
+MAX_STEPS = 200
+VALIDATION_EVERY_STEP = 100
+
+class Enviroment:
+    
+    def __init__(self):
+        self.env_train = StocksEnv(data_train)
+        self.env_val = StocksEnv(data_val)
+        input_shape = DEFAULT_BARS_COUNT*24+1
+        actions_n = len(Actions)
+        self.agent = Agent(input_shape, actions_n)
+    
+    def run(self):
+        writer = SummaryWriter(comment='linear_batchsize_32_comm_0.001')
+        for episode in range(DEFAULT_EPISODES):
+            obs = self.env_train.reset()
+            train_episode_reward = 0.0
+            state = torch.tensor([obs]).to(device)
+            for step in range(MAX_STEPS):
+                action = self.agent.get_action(state, episode)
+                obs_next, reward, done, info = self.env_train.step(action.item())
+                train_episode_reward += reward
+                reward = torch.FloatTensor([reward]).to(device)
+                state_next = torch.tensor([obs_next]).to(device)
+                self.agent.memorize(state, action, state_next, reward)
+                self.agent.update_q_function()
+                state = state_next
+                if done:
+                    break
+                    
+            if(episode % 2 == 0):
+                self.agent.update_target_q_function()
+                
+            if(episode % VALIDATION_EVERY_STEP == 0):
+                profit = self.validation_run()
+                torch.save(self.agent.brain.main_q_network.state_dict(),
+                    r""%episode+'.pth')
+
+            writer.add_scalar('train_reward', train_episode_reward, episode)
+            writer.add_scalar('val_profit', profit, episode)
+            
+    def validation_run(self):
+        
+        funds = 0
+        for i in range(len(data_val)):
+            obs = self.env_val.reset_val(i)
+
+            while True:
+                state = torch.tensor([obs]).to(device)
+                action = self.agent.get_action_val(state)
+                obs_next, _, done, _ = self.env_val.step(action.item())
+                obs = obs_next
+                if done:
+                    price = self.env_val.prices.price[self.env_val.offset]
+                    hold = self.env_val.hold
+                    if hold:
+                        self.env_val.fund += price * hold
+                        if int(price * hold * 0.001425) == 0:
+                            tax = 1
+                        else:
+                            tax = int(price * hold * 0.001425)
+                        self.env_val.fund -= (tax + int(price*hold*0.003))
+                    funds += self.env_val.fund
+                    break
+                    
+        mean_profit = ((funds/len(data_val)) - 100000) / 100000
+        return mean_profit    
+        
+  Stocks = Enviroment()
+  
+  Stocks.run()
